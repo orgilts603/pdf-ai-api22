@@ -1,0 +1,310 @@
+const path = require("path");
+const fs = require("fs").promises;
+
+const { GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI } = require('@langchain/google-genai');
+const { WeaviateStore } = require('@langchain/weaviate');
+const { PDFLoader } = require('@langchain/community/document_loaders/fs/pdf');
+const { RecursiveCharacterTextSplitter } = require('@langchain/textsplitters');
+const { default: supabase } = require("./supabase");
+const weaviateLib = require('weaviate-client').default;
+
+// --- Weaviate client ---
+const WEAVIATE_HOST = process.env.WEAVIATE_HOST;
+const WEAVIATE_API_KEY = process.env.WEAVIATE_API_KEY;
+
+
+async function makeWeaviateClient() {
+    console.time
+    // The weaviate-client package exposes helper connectToWeaviateCloud in recent versions.
+    // Fallback: instantiate raw client via weaviateLib.client({ scheme, host, apiKey: new ... })
+    if (typeof weaviateLib.connectToWeaviateCloud === 'function') {
+        const client = await weaviateLib.connectToWeaviateCloud(WEAVIATE_HOST, {
+            authCredentials: new weaviateLib.ApiKey(WEAVIATE_API_KEY),
+        });
+        // optional: await client.connect() if required by client version
+        return client;
+    } else {
+        // fallback manual client creation
+        const client = weaviateLib.client({
+            scheme: WEAVIATE_HOST.startsWith('https') ? 'https' : 'http',
+            host: WEAVIATE_HOST.replace(/^https?:\/\//, ''),
+            apiKey: new weaviateLib.ApiKey(WEAVIATE_API_KEY),
+        });
+        return client;
+    }
+}
+
+const llm = new ChatGoogleGenerativeAI({
+    modelName: process.env.GEMINI_CHAT_MODEL || 'models/gemini-2.5-flash-lite',
+    model: process.env.GEMINI_CHAT_MODEL || 'models/gemini-2.5-flash-lite',
+    apiKey: process.env.GOOGLE_API_KEY,
+    // temperature: 0.2,
+    // maxRetries: 2,
+    // maxOutputTokens: 2048,
+});
+
+// --- Embeddings setup ---
+const embeddings = new GoogleGenerativeAIEmbeddings({
+    model: 'models/gemini-embedding-001',
+    apiKey: process.env.GOOGLE_API_KEY,
+    batchSize: 64 // ⬅ 16-64 болгоорой, ихэнхдээ 4–5х хурдан болдог
+
+});
+
+/**
+ * PDF-г өгсөн path-аас уншиж, text-г chunk хийж, Weaviate-д хадгалах
+ * @param {string} pdfPath PDF файлын зам
+ * @param {string} indexName Weaviate-д ашиглах index/collection нэр
+ */
+
+
+async function ingestPdfToVectorDB(pdfPath, indexName = "default_books_index") {
+    const client = await makeWeaviateClient()
+    try {
+        console.time(`Ingestion process for ${pdfPath}`);
+
+        await fs.access(pdfPath);
+        const pdfFileName = path.basename(pdfPath);
+        console.log(`Processing PDF: ${pdfFileName}`);
+
+        // 1. PDF-г унших
+        console.time("1. Loading PDF");
+        const loader = new PDFLoader(pdfPath);
+        const rawDocs = await loader.load();
+        console.timeEnd("1. Loading PDF");
+
+        // 2. Text-г chunk-үүдэд хуваах
+        console.time("2. Splitting documents");
+        const textSplitter = new RecursiveCharacterTextSplitter({
+            chunkSize: 1000,
+            chunkOverlap: 150,
+        });
+        const docs = await textSplitter.splitDocuments(rawDocs);
+        console.log(`Split into ${docs.length} documents.`);
+        console.timeEnd("2. Splitting documents");
+
+        // x2 x3
+
+        // 3. Metadata нэмэх
+        docs.forEach(doc => {
+            doc.metadata.book_title = pdfFileName;
+            doc.metadata.source_path = pdfPath;
+            // 'loc.pageNumber' байхгүй тохиолдолд алдаа заахаас сэргийлэх
+            doc.metadata.page_number = doc.metadata.loc?.pageNumber || 0;
+        });
+
+        // 4. Ensure Weaviate collection exists with proper schema
+        console.time("3.1. Ensuring Weaviate schema");
+        try {
+            const collectionExists = await client.collections.exists(indexName);
+            if (!collectionExists) {
+                console.log(`Creating new Weaviate collection: ${indexName}`);
+                await client.collections.create({
+                    name: indexName,
+                    properties: [
+                        {
+                            name: 'content',
+                            dataType: ['text'],
+                            description: 'The text content of the document chunk'
+                        },
+                        {
+                            name: 'book_title',
+                            dataType: ['text'],
+                            description: 'Title of the source PDF'
+                        },
+                        {
+                            name: 'page_number',
+                            dataType: ['int'],
+                            description: 'Page number in the PDF'
+                        },
+                        {
+                            name: 'source_path',
+                            dataType: ['text'],
+                            description: 'File path of the PDF'
+                        }
+                    ],
+                    vectorizer: 'none' // We provide embeddings manually
+                });
+                console.log(`✅ Created collection: ${indexName}`);
+            } else {
+                console.log(`✅ Collection already exists: ${indexName}`);
+            }
+        } catch (schemaErr) {
+            console.error('⚠️ Schema check/create error (will try to continue):', schemaErr.message);
+        }
+        console.timeEnd("3.1. Ensuring Weaviate schema");
+
+        // 4. Vector DB-д хадгалах
+        console.time("3.2. Storing vectors to Weaviate");
+        await WeaviateStore.fromDocuments(docs, embeddings, {
+            client,
+            indexName,
+            textKey: 'content',
+            metadataKeys: ['book_title', 'page_number', 'source_path'],
+        });
+        console.timeEnd("3.2. Storing vectors to Weaviate");
+
+        console.log(`✅ PDF '${pdfFileName}' vectors saved to Weaviate under index '${indexName}'`);
+        console.timeEnd(`Ingestion process for ${pdfPath}`);
+        return { ok: true, message: "Success", pdf: pdfFileName, indexName, docCount: docs.length };
+
+    } catch (err) {
+        console.error("❌ Error ingesting PDF:", err.stack || err.message);
+        return { ok: false, error: err.message };
+    }
+}
+
+
+async function askQuestion(query, indexName, bookName, conversation_group_id) {
+    const client = await makeWeaviateClient();
+    console.log({
+        query, indexName, bookName, conversation_group_id
+    })
+    let conversationHistory = [
+
+    ];
+
+    if (conversation_group_id && (conversation_group_id + "").length > 0) {
+        conversationHistory = await supabase.from("conversations").select("*").eq("conversation_group_id", conversation_group_id).order("created_time", {
+            ascending: true
+        }).limit(20).then(e => e.data)
+    }
+
+    try {
+        console.time("Total question answering time");
+        console.log(`Querying index '${indexName}' for book '${bookName}'`);
+        const vectorStore = await WeaviateStore.fromExistingIndex(embeddings, {
+            client,
+            indexName: indexName,
+            textKey: 'content',
+            metadataKeys: ['book_title', 'page_number', 'source_path'],
+        });
+
+        // LangChain JS-д зориулсан where филтерийг ашиглах
+        // Энэ нь зөвхөн тухайн номын chunk-үүдээс хайлт хийнэ.
+        const weaviateFilter = {
+            operator: 'Equal',
+            path: ['book_title'],
+            valueText: bookName,
+        };
+
+        const retriever = vectorStore.asRetriever({
+            k: 10,
+            searchKwargs: {
+                where: weaviateFilter // where филтер ашиглах
+            }
+        });
+
+        const qaSystemPrompt = `
+CodeyGym AI — Сургалтын багшийн дүрэм
+
+Үүрэг (Purpose)
+Чи бол тэвчээртэй, мэдлэгтэй, ойлгомжтой AI багш. Зорилго — сурагчдад тухайн хичээлийн агуулгад тулгуурласан, логик дараалалтай, товч боловч бүрэн хариулт өгөх.
+
+Хариулах зарчим
+
+Зөвхөн өгөгдсөн хичээлийн материал болон өмнөх харилцан яриаг (chat history) ашиглан хариул.
+
+Хэрэв асуултын хариулт хичээлийн материалд олдохгүй бол яг тодорхой тийм хэлээр хэл: “Энэ мэдээлэл хичээлд олдсонгүй.”
+Дараа нь тухайн сэдвийн хүрээнд ойлгомжтой тайлбар, жишээ болон хэрэгтэй зөвлөмж өгөх.
+
+Худал зүйл зохиож болохгүй. Баримтгүй таамаг, ташаа мэдээлэл бүү нэм.
+
+Хариултын бүтэц (хамгийн эхэндээс дараалалтай)
+
+Товч хариулт: Гол санааг нэг хоёр мөрт багтааж өг.
+
+Тайлбар / Жишээ: Алхам дараалал, богино жишээг ашигла.
+
+Дүгнэлт / Дараагийн алхам: Давтаж, сурагчид юуг хийхийг санал болго.
+
+Мэндчилгээ ба хэлний хэв маяг
+
+Хэллэг: Эелдэг, ойлгомжтой, урам өгсөн.
+
+Хэрвээ өмнөх харилцан яриа байгаа бол мэндчилгээг давт битгий хэл.
+
+Хүссэн тохиолдолд emoji ашиглаж болно (гэхдээ зохимжгүй их бүү хэрэглэ).
+
+Баталгаажуулалт болон сурагчийг шалгах асуултууд
+
+Хариуныхаа төгсгөлд сурагчийг ойлголтоо шалгах эсвэл бэлдэхэд туслах жижиг асуулту оруул:
+
+“Энгийнээр хэлбэл — ?”
+
+“Өөрөөр тайлбарлавал — ?”
+
+“Энд асуулт байна уу?”
+
+Техникийн тэмдэглэл
+
+Бүх хариултанд үнэн зөв, шалгагдсан эх сурвалж байхгүй бол таамаг бүү оруул.
+<context>
+{context}
+</context>`;
+
+
+        const formattedContext = (conversationHistory || [])
+            .map(m => {
+                // хэрвээ мессеж рол мэдэгдэхгүй бол асуулт/хариултаар таамаглана
+                const q = m.question;
+                const a = m.answer;
+                return `User: ${q}\nAssistant: ${a}`;
+            })
+            .join('\n---\n');
+
+
+        const MAX_CONTEXT_CHARS = 20_000;
+        const safeContext = formattedContext.length > MAX_CONTEXT_CHARS
+            ? formattedContext.slice(-MAX_CONTEXT_CHARS) // сүүлийн хэсгийг авна
+            : formattedContext;
+
+        const { ChatPromptTemplate, MessagesPlaceholder } = require('@langchain/core/prompts');
+        const { createStuffDocumentsChain } = require('langchain/chains/combine_documents');
+        const { createRetrievalChain } = require('langchain/chains/retrieval');
+
+        const prompt = ChatPromptTemplate.fromMessages([
+            ['system', qaSystemPrompt],
+            new MessagesPlaceholder('history'), // 👈 энэ бол өмнөх яриаг оруулах хэсэг
+
+            ['human', '{input}'],
+        ]);
+
+        const questionAnswerChain = await createStuffDocumentsChain({ llm, prompt });
+        const chain = await createRetrievalChain({
+            retriever,
+            combineDocsChain: questionAnswerChain,
+
+        });
+
+        const chatHistory = [];
+
+        for (const msg of conversationHistory) {
+            if (msg.question) {
+                chatHistory.push({ role: 'user', content: msg.question });
+            }
+            if (msg.answer) {
+                chatHistory.push({ role: 'assistant', content: msg.answer });
+            }
+        }
+
+        console.time("Chain invocation time");
+        const response = await chain.invoke({ input: query, history: chatHistory });
+        console.log(chatHistory);
+        console.timeEnd("Chain invocation time");
+
+        console.log('\n--- Хариулт ---');
+        console.log(response.answer);
+        console.timeEnd("Total question answering time");
+        console.log({ conversation_group_id, qaSystemPrompt })
+
+
+
+        return response;
+    } catch (err) {
+        console.error('❌ Асуулга асуухад алдаа гарлаа:', err.stack || err.message);
+        throw err;
+    }
+}
+
+module.exports = { ingestPdfToVectorDB, askQuestion }

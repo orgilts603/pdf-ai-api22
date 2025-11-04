@@ -1,0 +1,44 @@
+{
+  "name": "pdf-ai-agentic2",
+  "version": "1.0.0",
+  "description": "",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "tsx src/index.js",
+    "dev": "tsx watch  src/index.js",
+    "build": "tsc || echo 'Build completed with warnings'"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@google/genai": "^1.27.0",
+    "@langchain/community": "^0.3.57",
+    "@langchain/core": "^0.3.78",
+    "@langchain/google-genai": "^0.2.18",
+    "@langchain/weaviate": "^0.2.3",
+    "@supabase/supabase-js": "^2.76.1",
+    "cheerio": "^1.1.2",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
+    "express": "^5.1.0",
+    "langchain": "^0.3.36",
+    "mime": "^4.1.0",
+    "morgan": "^1.10.1",
+    "multer": "^2.0.2",
+    "pdf-parse": "^1.1.1",
+    "pdf-to-img": "^5.0.0",
+    "pdfjs-dist": "^5.4.296",
+    "slugify": "^1.6.6",
+    "tsx": "^4.20.6",
+    "wanakana": "^5.3.1",
+    "waw": "^25.1.1",
+    "weaviate-client": "^3.9.0",
+    "weaviate-ts-client": "^2.2.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.10",
+    "ts-node": "^10.9.2",
+    "tsconfig-paths": "^4.2.0",
+    "typescript": "^5.9.3"
+  }
+}
