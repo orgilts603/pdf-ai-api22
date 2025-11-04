@@ -4,7 +4,14 @@ const fs = require("fs").promises;
 const { GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI } = require('@langchain/google-genai');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const { WeaviateStore } = require('@langchain/weaviate');
-const pdfjs = require("pdfjs-dist/legacy/build/pdf.mjs");
+// Lazy-load pdfjs as ES Module (Vercel compatibility fix)
+let pdfjs = null;
+const getPdfjs = async () => {
+    if (!pdfjs) {
+        pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+    }
+    return pdfjs;
+};
 const { RecursiveCharacterTextSplitter } = require('@langchain/textsplitters');
 const { default: supabase } = require("./supabase");
 const weaviateLib = require('weaviate-client').default;
@@ -76,12 +83,6 @@ export async function ingestPdfToVectorDB(pdfPath, indexName = "default_books_in
         console.time("1. Loading PDF");
         const dataBuffer = await fs.readFile(pdfPath);
 
-
-        const loader = new PDFLoader(pdfPath, {
-            pdfjs: () => pdfjs
-        });
-        const rawDocs2 = await loader.load();
-        await fs.writeFile("test-docs2.json", JSON.stringify(rawDocs2, null, 2))
         // cMaps болон standard fonts зам (ABSOLUTE PATH)
         const nodeModulesPath = path.resolve(__dirname, '../../node_modules/pdfjs-dist');
         const cmapsPath = path.join(nodeModulesPath, 'cmaps').replace(/\\/g, '/') + '/';
@@ -89,7 +90,8 @@ export async function ingestPdfToVectorDB(pdfPath, indexName = "default_books_in
 
         console.log('✅ PDF.js paths:', { cmapsPath, fontsPath });
 
-        const loadingTask = pdfjs.getDocument({
+        const pdfjsLib = await getPdfjs();
+        const loadingTask = pdfjsLib.getDocument({
             data: new Uint8Array(dataBuffer),
             cMapUrl: cmapsPath,
             cMapPacked: true,
@@ -239,7 +241,8 @@ async function askQuestion(query, indexName, bookName, conversationId, pdfUrl, c
 
     console.log('✅ PDF.js paths:', { cmapsPath, fontsPath });
 
-    const loadingTask = pdfjs.getDocument({
+    const pdfjsLib = await getPdfjs();
+    const loadingTask = pdfjsLib.getDocument({
         data: arrayBuffer,
         cMapUrl: cmapsPath,
         cMapPacked: true,
