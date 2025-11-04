@@ -4,9 +4,10 @@
   "description": "",
   "main": "src/index.js",
   "scripts": {
-    "start": "tsx src/index.js",
+    "start": "node dist/index.js",
     "dev": "tsx watch  src/index.js",
-    "build": "tsc || echo 'Build completed with warnings'"
+    "build": "tsc || echo 'Build completed with warnings'",
+    "postinstall": "npm ci --only=production"
   },
   "author": "",
   "license": "ISC",

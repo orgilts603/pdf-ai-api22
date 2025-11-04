@@ -63,7 +63,7 @@ const embeddings = new GoogleGenerativeAIEmbeddings({
  */
 
 
-async function ingestPdfToVectorDB(pdfPath, indexName = "default_books_index") {
+export async function ingestPdfToVectorDB(pdfPath, indexName = "default_books_index") {
     const client = await makeWeaviateClient()
     try {
         console.time(`Ingestion process for ${pdfPath}`);
